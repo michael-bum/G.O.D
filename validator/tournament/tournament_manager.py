@@ -9,7 +9,6 @@ from fiber.chain.models import Node
 
 import validator.core.constants as cst
 from core.models.payload_models import TrainingRepoResponse
-from core.whitelisted_sft_datasets import validate_requested_datasets
 from core.models.tournament_models import Group
 from core.models.tournament_models import GroupRound
 from core.models.tournament_models import KnockoutRound
@@ -26,6 +25,7 @@ from core.models.tournament_models import TournamentType
 from core.models.tournament_models import generate_round_id
 from core.models.tournament_models import generate_tournament_id
 from core.models.utility_models import TaskStatus
+from core.whitelisted_sft_datasets import validate_requested_datasets
 from validator.core.config import Config
 from validator.core.constants import EMISSION_BURN_HOTKEY
 from validator.core.models import AnyTypeTask
@@ -67,7 +67,9 @@ from validator.tournament.task_creator import create_image_tournament_tasks
 from validator.tournament.task_creator import create_text_tournament_tasks
 from validator.tournament.task_creator import replace_tournament_task
 from validator.tournament.utils import determine_env_tournament_winner
+from validator.tournament.utils import generate_diff_report_and_notify_tournament_completed
 from validator.tournament.utils import get_base_contestant
+from validator.tournament.utils import get_challenger_participant_for_retained_boss
 from validator.tournament.utils import get_latest_tournament_winner_participant
 from validator.tournament.utils import get_round_winners
 from validator.tournament.utils import notify_tournament_completed
@@ -423,8 +425,13 @@ async def advance_tournament(tournament: TournamentData, completed_round: Tourna
             # await update_tournament_status(tournament.tournament_id, TournamentStatus.COMPLETED, psql_db)
             logger.info(f"Tournament {tournament.tournament_id} completed with winner: {winner}. Please update DB manually.")
 
-            await notify_tournament_completed(
-                tournament.tournament_id, tournament.tournament_type.value, winner, config.discord_url
+            asyncio.create_task(
+                notify_tournament_completed(
+                    tournament.tournament_id,
+                    tournament.tournament_type.value,
+                    winner,
+                    config.discord_url,
+                )
             )
 
             await upload_participant_repository(tournament.tournament_id, tournament.tournament_type, winner, 1, config, psql_db)
@@ -461,10 +468,6 @@ async def advance_tournament(tournament: TournamentData, completed_round: Tourna
             # await update_tournament_status(tournament.tournament_id, TournamentStatus.COMPLETED, psql_db)
             logger.info(f"Tournament {tournament.tournament_id} completed with winner: {winner}. Please update DB manually.")
 
-            await notify_tournament_completed(
-                tournament.tournament_id, tournament.tournament_type.value, winner, config.discord_url
-            )
-
             if winner != cst.EMISSION_BURN_HOTKEY:
                 try:
                     logger.info(f"Creating benchmark tasks for tournament winner {winner}")
@@ -476,8 +479,35 @@ async def advance_tournament(tournament: TournamentData, completed_round: Tourna
                     logger.error(f"Error creating benchmark tasks for tournament winner {winner}: {str(e)}")
 
             logger.info(f"Uploading winner repository for hotkey: {winner}")
-            await upload_participant_repository(
+            position_1_repo = await upload_participant_repository(
                 tournament.tournament_id, tournament.tournament_type, winner, 1, config, psql_db
+            )
+
+            challenger_repo = position_1_repo
+            challenger_commit_hash = None
+            challenger_github_token = None
+            if winner == cst.EMISSION_BURN_HOTKEY:
+                challenger = await get_challenger_participant_for_retained_boss(
+                    tournament, completed_round, winners, psql_db
+                )
+                challenger_repo = challenger.training_repo if challenger else None
+                challenger_commit_hash = challenger.training_commit_hash if challenger else None
+                challenger_github_token = challenger.github_token if challenger else None
+                result_summary = f"Boss retained; challenger was {challenger.hotkey if challenger else 'unknown'}."
+            else:
+                result_summary = f"Winner changed; new winner hotkey: {winner}."
+
+            asyncio.create_task(
+                generate_diff_report_and_notify_tournament_completed(
+                    tournament,
+                    challenger_repo,
+                    result_summary,
+                    winner,
+                    config.discord_url,
+                    psql_db,
+                    challenger_commit_hash=challenger_commit_hash,
+                    challenger_github_token=challenger_github_token,
+                )
             )
             return
         else:
