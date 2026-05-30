@@ -53,7 +53,7 @@ def accumulate_points(
 
 
 def pvp_results_to_pairwise(group_results: PvPGroupResults) -> list[PairwiseOutcome]:
-    """Convert PvP group round-robin results into universal pairwise outcomes."""
+    """Convert PvP pair results into universal pairwise outcomes."""
     outcomes: list[PairwiseOutcome] = []
 
     for pair in group_results.pair_results:
@@ -75,15 +75,15 @@ def pvp_results_to_pairwise(group_results: PvPGroupResults) -> list[PairwiseOutc
     return outcomes
 
 
-# --- MCTS scores → pairwise ---
+# --- Individual scores → pairwise ---
 
 
-def mcts_scores_to_pairwise(
+def individual_scores_to_pairwise(
     scores_by_hotkey: dict[str, float],
     environment: EnvironmentName,
-    win_margin: float = cts.MCTS_WIN_MARGIN,
+    win_margin: float = cts.INDIVIDUAL_WIN_MARGIN,
 ) -> list[PairwiseOutcome]:
-    """Convert independent MCTS scores into pairwise outcomes.
+    """Convert independent scores into pairwise outcomes.
 
     A must exceed B by win_margin (fractional) to count as a win.
     Scores within the margin = draw.

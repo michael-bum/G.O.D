@@ -18,8 +18,7 @@ from validator.cycle.util_functions import get_model_num_params
 from validator.db.database import PSQLDB
 from validator.evaluation.scoring import evaluate_and_score_hotkeys
 from validator.evaluation.scoring import finalize_task_scores_from_raw_losses
-from validator.evaluation.scoring import should_use_pvp
-from validator.tournament.utils import send_to_discord
+from validator.evaluation.scoring import should_use_tournament_eval
 from validator.utils.cache_clear import clean_all_hf_datasets_cache
 from validator.utils.cache_clear import manage_models_cache
 from validator.utils.logging import LogContext
@@ -29,13 +28,14 @@ from validator.utils.logging import get_logger
 
 logger = get_logger(__name__)
 _EVALUATING_ROWS_LOCK = asyncio.Lock()
+_TOURNAMENT_GROUP_EVAL_TYPES = frozenset({core_cst.EvalType.PVP, core_cst.EvalType.INDIVIDUAL})
 
 
-def _pvp_environment_names() -> list[str]:
+def _tournament_environment_names() -> list[str]:
     return [
         name.value
         for name, env_config in core_cst.ENVIRONMENT_CONFIGS.items()
-        if env_config.eval_type == core_cst.EvalType.PVP
+        if env_config.eval_type in _TOURNAMENT_GROUP_EVAL_TYPES
     ]
 
 
@@ -167,7 +167,8 @@ async def _seed_task_evaluations_for_evaluation(config: Config) -> None:
     for task in preevaluation_tasks:
         try:
             assert task.task_id is not None
-            await tasks_sql.add_task_evaluation_pairs(task.task_id, config.psql_db)
+            pvp = should_use_tournament_eval(task)
+            await tasks_sql.add_task_evaluation_pairs(task.task_id, config.psql_db, include_failed_training=pvp)
             task.status = TaskStatus.EVALUATING
             add_context_tag("status", task.status.value)
             await tasks_sql.update_task(task, config.psql_db)
@@ -296,7 +297,7 @@ async def _evaluate_and_update_hotkeys(task: AnyTypeRawTask, hotkeys: list[str],
 async def _evaluate_pending_pairs_for_task(task: AnyTypeRawTask, num_gpus: int, config: Config):
     assert task.task_id is not None
 
-    batch_together = task.task_type == TaskType.GRPOTASK or should_use_pvp(task)
+    batch_together = task.task_type == TaskType.GRPOTASK or should_use_tournament_eval(task)
     if batch_together:
         training_statuses = await tournament_sql.get_training_status_for_task(str(task.task_id), config.psql_db)
         if training_statuses and any(status not in ("success", "failure") for status in training_statuses.values()):
@@ -319,12 +320,12 @@ async def _evaluate_pending_pairs_for_task(task: AnyTypeRawTask, num_gpus: int, 
         pending_batch = [hotkey for hotkey in hotkeys if hotkey in pending_hotkeys]
         if pending_batch:
             async with _EVALUATING_ROWS_LOCK:
-                pvp_env_names = _pvp_environment_names()
+                tournament_env_names = _tournament_environment_names()
                 group_evaluations = await tasks_sql.count_group_task_evaluations_by_status(
-                    "evaluating", pvp_env_names, config.psql_db
+                    "evaluating", tournament_env_names, config.psql_db
                 )
                 non_group_evaluating_rows = await tasks_sql.count_non_group_task_evaluation_rows_by_status(
-                    "evaluating", pvp_env_names, config.psql_db
+                    "evaluating", tournament_env_names, config.psql_db
                 )
                 total_eval_slots = group_evaluations + non_group_evaluating_rows
                 available_slots = cst.MAX_EVALUATING_ROWS - total_eval_slots

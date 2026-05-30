@@ -5,17 +5,15 @@ from uuid import UUID
 
 from core import constants as cst
 from core.models.payload_models import DockerEvaluationResults
-from core.models.payload_models import EvaluationResultImage
-from core.models.payload_models import EvaluationResultText
-from core.models.pvp_models import (
-    PvPEvalConfig,
-    PvPEvalResults,
-    PvPGroupResults,
-    PvPMatchupConfig,
-    PvPMode,
-    PvPModelSpec,
-    PvPPairResult,
-)
+from core.models.pvp_models import PvPEvalConfig
+from core.models.pvp_models import PvPEvalResults
+from core.models.pvp_models import PvPGroupResults
+from core.models.pvp_models import PvPMatchupConfig
+from core.models.pvp_models import PvPMode
+from core.models.pvp_models import PvPModelSpec
+from core.models.pvp_models import PvPPairResult
+from core.models.scoring_models import IndividualEvalResult
+from core.models.scoring_models import MinerRepos
 from core.models.utility_models import ChatTemplateDatasetType
 from core.models.utility_models import DpoDatasetType
 from core.models.utility_models import EnvironmentDatasetType
@@ -33,15 +31,16 @@ from validator.evaluation.basilica import _fetch_attempt_logs
 from validator.evaluation.basilica import _get_healthy_existing_basilica_deployment
 from validator.evaluation.basilica import _poll_eval_deployment
 from validator.evaluation.basilica import run_basilica_eval_repos
-from validator.evaluation.db_utils import load_shared_eval_deployment_id
 from validator.evaluation.db_utils import load_eval_pair_state_for_models
+from validator.evaluation.db_utils import load_shared_eval_deployment_id
 from validator.evaluation.db_utils import persist_shared_eval_deployment_id
-from validator.evaluation.utils import create_basilica_eval_runner_source
 from validator.evaluation.utils import _log_eval_step
+from validator.evaluation.utils import create_basilica_eval_runner_source
 from validator.evaluation.utils import normalize_rewards_and_compute_loss
 from validator.evaluation.utils import process_evaluation_results
 from validator.utils.logging import get_environment_logger
 from validator.utils.logging import get_logger
+
 
 try:
     import basilica
@@ -50,6 +49,11 @@ except ImportError:
 
 
 logger = get_logger(__name__)
+
+
+def _first_environment_name(dataset_type: EnvironmentDatasetType) -> cst.EnvironmentName | None:
+    environment_names = dataset_type.environment_names or []
+    return environment_names[0] if environment_names else None
 
 
 async def _db_read_with_retry(coro_factory, op_name: str):
@@ -111,6 +115,7 @@ async def run_evaluation_basilica_text(
     eval_seed: int | None = None,
     task_id: UUID | None = None,
     psql_db: PSQLDB | None = None,
+    local_logging: bool | None = False,
 ) -> DockerEvaluationResults:
     deployment_ids_by_repo = {}
     db_deployment_ids_by_repo, repo_to_hotkey = await _db_read_with_retry(
@@ -121,7 +126,15 @@ async def run_evaluation_basilica_text(
         deployment_ids_by_repo.setdefault(repo, dep_info)
     task_type = type(dataset_type).__name__
     is_environment_eval = isinstance(dataset_type, EnvironmentDatasetType)
-    basilica_image = cst.VALIDATOR_DOCKER_IMAGE_ENV if is_environment_eval else cst.VALIDATOR_DOCKER_IMAGE
+    environment_name = _first_environment_name(dataset_type) if is_environment_eval else None
+    environment_name_value = getattr(environment_name, "value", environment_name)
+    is_intercode_eval = is_environment_eval and environment_name_value == cst.EnvironmentName.INTERCODE.value
+    if is_intercode_eval:
+        basilica_image = cst.VALIDATOR_DOCKER_IMAGE_INTERCODE
+    elif is_environment_eval:
+        basilica_image = cst.VALIDATOR_DOCKER_IMAGE_ENV
+    else:
+        basilica_image = cst.VALIDATOR_DOCKER_IMAGE
     if isinstance(dataset_type, (InstructTextDatasetType, ChatTemplateDatasetType)):
         command = ["python", "-m", "validator.evaluation.eval_instruct_text"]
     elif isinstance(dataset_type, DpoDatasetType):
@@ -134,7 +147,10 @@ async def run_evaluation_basilica_text(
             deployment_ids_by_repo=deployment_ids_by_repo,
         )
     elif isinstance(dataset_type, EnvironmentDatasetType):
-        command = ["python", "-m", "validator.evaluation.eval_environment"]
+        if is_intercode_eval:
+            command = ["python", "-m", "validator.evaluation.eval_intercode"]
+        else:
+            command = ["python", "-m", "validator.evaluation.eval_environment"]
     else:
         raise ValueError(f"Unsupported dataset type: {type(dataset_type)}")
     if not is_environment_eval and not dataset.startswith("http://") and not dataset.startswith("https://"):
@@ -153,14 +169,16 @@ async def run_evaluation_basilica_text(
         **vcst.HF_CONTAINER_ENV,
     }
     if is_environment_eval:
-        env_name = (dataset_type.environment_names or [None])[0]
+        env_name = cst.EnvironmentName(environment_name_value) if environment_name_value else None
         if env_name not in cst.ENVIRONMENT_CONFIGS:
             raise ValueError(f"Environment '{env_name}' not found. Supported: {[e.value for e in cst.EnvironmentName]}")
         base_seed = eval_seed if eval_seed is not None else vcst.ENV_EVAL_DEFAULT_SEED
         base_env["ENVIRONMENT_NAME"] = env_name.value
         base_env["EVAL_SEED"] = str(base_seed)
         base_env["ENV_EVAL_TEMPERATURE"] = str(vcst.ENV_EVAL_TEMPERATURE)
-        base_env["ENV_SERVER_CMD"] = vcst.ENV_SERVER_CMD_DEFAULT
+        # InterCode runs bash actions in-process, so only generic envs get ENV_SERVER_CMD.
+        if not is_intercode_eval:
+            base_env["ENV_SERVER_CMD"] = vcst.ENV_SERVER_CMD_DEFAULT
 
     logger.debug(f"Running Basilica {task_type} evaluation (per-repo deployments) for models: {models}")
 
@@ -183,10 +201,12 @@ async def run_evaluation_basilica_text(
         gpu_count=max(1, num_gpus),
         gpu_models=vcst.BASILICA_GPU_MODELS,
         min_gpu_memory_gb=vcst.BASILICA_SGLANG_MIN_GPU_MEMORY_GB,
+        storage=False,
         task_id=task_id,
         psql_db=psql_db,
         repo_to_hotkey=repo_to_hotkey,
         deployment_ids_by_repo=deployment_ids_str,
+        local_logging=local_logging,
     )
 
     evaluation_results = _collect_repo_evaluation_results(models, repo_results)
@@ -320,7 +340,6 @@ async def run_evaluation_basilica_image(
     evaluation_results = _collect_repo_evaluation_results(models, repo_results)
     return process_evaluation_results(evaluation_results, is_image=True)
 
-
 async def _persist_pvp_deployment_id(
     *,
     task_id: UUID | None,
@@ -346,15 +365,19 @@ async def _deploy_pvp_eval(
     pvp_config: PvPEvalConfig,
     label: str,
     repos_label: str,
+    image: str | None = None,
+    gpu_count: int | None = None,
     task_id: UUID | None = None,
     psql_db: PSQLDB | None = None,
     hotkeys: list[str] | None = None,
 ) -> dict:
     """Deploy a PvP eval container via Basilica and return the raw result dict.
 
-    Shared by both group and pair eval paths.
+    Shared by PvP pair eval calls.
     """
     hotkeys = hotkeys or []
+    image = image or cst.VALIDATOR_DOCKER_IMAGE_PVP
+    gpu_count = gpu_count or vcst.PVP_BASILICA_GPU_COUNT
     env = {
         vcst.PVP_CONFIG_ENV_VAR: pvp_config.model_dump_json(),
         **vcst.HF_CONTAINER_ENV,
@@ -426,8 +449,8 @@ async def _deploy_pvp_eval(
             log_step(
                 "deploy_start",
                 deployment=deployment_name,
-                image=cst.VALIDATOR_DOCKER_IMAGE_PVP,
-                gpu_count=vcst.PVP_BASILICA_GPU_COUNT,
+                image=image,
+                gpu_count=gpu_count,
                 gpu_models=",".join(vcst.BASILICA_GPU_MODELS),
                 min_gpu_memory_gb=vcst.BASILICA_SGLANG_MIN_GPU_MEMORY_GB,
             )
@@ -435,14 +458,14 @@ async def _deploy_pvp_eval(
                 client.deploy,
                 name=deployment_name,
                 source=source,
-                image=cst.VALIDATOR_DOCKER_IMAGE_PVP,
+                image=image,
                 port=vcst.PVP_BASILICA_PORT,
                 cpu=vcst.EVAL_BASILICA_CPU,
                 memory=vcst.EVAL_BASILICA_MEMORY,
                 ttl_seconds=vcst.PVP_BASILICA_TTL_SECONDS,
                 timeout=vcst.EVAL_BASILICA_TIMEOUT,
                 env=env,
-                gpu_count=vcst.PVP_BASILICA_GPU_COUNT,
+                gpu_count=gpu_count,
                 gpu_models=vcst.BASILICA_GPU_MODELS,
                 min_gpu_memory_gb=vcst.BASILICA_SGLANG_MIN_GPU_MEMORY_GB,
             )
@@ -500,6 +523,76 @@ async def _deploy_pvp_eval(
     raise RuntimeError(f"PvP {label} evaluation failed")
 
 
+async def run_evaluation_individual(
+    miners: MinerRepos,
+    base_model: str,
+    environment_name: cst.EnvironmentName,
+    seed: int,
+    image: str,
+    gpu_count: int,
+    task_id: UUID | None = None,
+    psql_db: PSQLDB | None = None,
+) -> IndividualEvalResult:
+    """Run individual (per-miner) eval containers for a single environment.
+
+    Each miner gets its own container. The container runs one model and returns
+    a score via the standard eval_loss result format.
+    """
+    env_config = cst.ENVIRONMENT_CONFIGS[environment_name]
+    if not env_config.tournament_eval_command:
+        raise ValueError(f"No tournament_eval_command configured for {environment_name.value}")
+    command = env_config.tournament_eval_command
+    source = create_basilica_eval_runner_source(command, cst.CONTAINER_EVAL_RESULTS_PATH)
+
+    base_env = {
+        "ORIGINAL_MODEL": base_model,
+        "ENVIRONMENT_NAME": environment_name.value,
+        "EVAL_SEED": str(seed),
+        "ENV_EVAL_TEMPERATURE": str(vcst.ENV_EVAL_TEMPERATURE),
+        "TRANSFORMERS_ALLOW_TORCH_LOAD": "true",
+        **vcst.HF_CONTAINER_ENV,
+    }
+
+    repo_to_hotkey = {repo: hotkey for hotkey, repo in miners.by_hotkey.items()}
+
+    def build_env_for_repo(repo: str) -> dict[str, str]:
+        repo_env = dict(base_env)
+        repo_env["MODELS"] = repo
+        return repo_env
+
+    repo_results = await run_basilica_eval_repos(
+        repos=miners.repos,
+        model_name=base_model,
+        task_type=f"ITournEval[{environment_name.value}]",
+        image=image,
+        source=source,
+        build_env_for_repo=build_env_for_repo,
+        gpu_count=max(1, gpu_count),
+        gpu_models=vcst.BASILICA_GPU_MODELS,
+        min_gpu_memory_gb=vcst.BASILICA_SGLANG_MIN_GPU_MEMORY_GB,
+        task_id=task_id,
+        psql_db=psql_db,
+        repo_to_hotkey=repo_to_hotkey,
+    )
+
+    scores: dict[str, float] = {}
+    for repo, result in repo_results.items():
+        hotkey = repo_to_hotkey.get(repo, repo)
+        if isinstance(result, dict):
+            inner = result.get(repo, result)
+            if isinstance(inner, dict):
+                scores[hotkey] = float(inner.get(cst.CONTAINER_EVAL_SCORE_KEY, 0.0))
+            else:
+                logger.warning(f"Individual eval unexpected result for {repo}: {inner}")
+        else:
+            logger.warning(f"Individual eval failed for {repo}: {result}")
+
+    return IndividualEvalResult(
+        environment_name=environment_name,
+        scores_by_hotkey=scores,
+    )
+
+
 async def run_evaluation_pvp_pair(
     model_a_repo: str,
     model_b_repo: str,
@@ -508,6 +601,8 @@ async def run_evaluation_pvp_pair(
     base_model: str,
     environment_names: list[cst.EnvironmentName],
     seed: int,
+    image: str | None = None,
+    gpu_count: int | None = None,
     temperature: float = 0.0,
     task_id: UUID | None = None,
     psql_db: PSQLDB | None = None,
@@ -533,6 +628,8 @@ async def run_evaluation_pvp_pair(
         pvp_config,
         "pair",
         repos_label,
+        image=image,
+        gpu_count=gpu_count,
         task_id=task_id,
         psql_db=psql_db,
         hotkeys=[hotkey_a, hotkey_b],

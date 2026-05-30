@@ -21,12 +21,13 @@ IS_PROD_ENV = NETUID == DEFAULT_NETUID
 VALIDATOR_DOCKER_IMAGE = "gradientsio/text-evaluator:basilica"
 VALIDATOR_DOCKER_IMAGE_DIFFUSION = "gradientsio/image-evaluator:basilica"
 VALIDATOR_DOCKER_IMAGE_ENV = "gradientsio/env-evaluator:basilica"
-VALIDATOR_DOCKER_IMAGE_PVP = "phoenixbeaudry/pvp-evaluator:v7"
+VALIDATOR_DOCKER_IMAGE_INTERCODE = "phoenixbeaudry/env-eval-intercode:basilica"
+VALIDATOR_DOCKER_IMAGE_PVP = "phoenixbeaudry/pvp-evaluator:v9"
 MCTS_API_DOCKER_IMAGE = "diagonalge/mcts-api:latest"
 
 
 class EvalType(str, Enum):
-    MCTS = "mcts"
+    INDIVIDUAL = "individual"
     PVP = "pvp"
 
 
@@ -44,6 +45,7 @@ class EnvironmentName(str, Enum):
     GIN_RUMMY = "gin_rummy"
     LIARS_DICE = "liars_dice"
     LEDUC_POKER = "leduc_poker"
+    INTERCODE = "intercode"
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,17 @@ class EnvironmentConfig:
     num_baseline_episodes: int
     eval_type: EvalType
     env_image: str = ""
+    env_server_command: list[str] | None = None
+    tournament_eval_image: str = VALIDATOR_DOCKER_IMAGE_PVP
+    tournament_eval_command: list[str] | None = None
+    gpu_multiplier: int = 4
     eval_payload_extra: dict | None = None
+
+    def __post_init__(self):
+        if self.eval_type == EvalType.INDIVIDUAL and not self.tournament_eval_command:
+            raise ValueError(
+                "EnvironmentConfig with eval_type=INDIVIDUAL must define tournament_eval_command"
+            )
 
 
 ENVIRONMENT_CONFIGS: dict[EnvironmentName, EnvironmentConfig] = {
@@ -65,6 +77,8 @@ ENVIRONMENT_CONFIGS: dict[EnvironmentName, EnvironmentConfig] = {
         num_baseline_episodes=50,
         eval_type=EvalType.PVP,
         env_image=MCTS_API_DOCKER_IMAGE,
+        tournament_eval_image=VALIDATOR_DOCKER_IMAGE_PVP,
+        gpu_multiplier=4,
         eval_payload_extra={
             "opponent": "mcts",
             "mcts_max_simulations": 50,
@@ -79,6 +93,8 @@ ENVIRONMENT_CONFIGS: dict[EnvironmentName, EnvironmentConfig] = {
         num_baseline_episodes=50,
         eval_type=EvalType.PVP,
         env_image=MCTS_API_DOCKER_IMAGE,
+        tournament_eval_image=VALIDATOR_DOCKER_IMAGE_PVP,
+        gpu_multiplier=4,
         eval_payload_extra={
             "opponent": "mcts",
             "mcts_max_simulations": 225,
@@ -93,6 +109,8 @@ ENVIRONMENT_CONFIGS: dict[EnvironmentName, EnvironmentConfig] = {
         num_baseline_episodes=25,
         eval_type=EvalType.PVP,
         env_image=MCTS_API_DOCKER_IMAGE,
+        tournament_eval_image=VALIDATOR_DOCKER_IMAGE_PVP,
+        gpu_multiplier=4,
         eval_payload_extra={
             "opponent": "mcts",
             "mcts_max_simulations": 50,
@@ -100,9 +118,31 @@ ENVIRONMENT_CONFIGS: dict[EnvironmentName, EnvironmentConfig] = {
             "api_key": "dummy-key",
         },
     ),
+    EnvironmentName.INTERCODE: EnvironmentConfig(
+        task_id_min=1,
+        task_id_max=200,
+        num_seeds=20,
+        num_baseline_episodes=7,
+        eval_type=EvalType.INDIVIDUAL,
+        env_image=VALIDATOR_DOCKER_IMAGE_INTERCODE,
+        env_server_command=[
+            "python",
+            "-m",
+            "uvicorn",
+            "validator.evaluation.intercode_server:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ],
+        tournament_eval_image=VALIDATOR_DOCKER_IMAGE_INTERCODE,
+        tournament_eval_command=["python", "-m", "validator.evaluation.eval_intercode"],
+        gpu_multiplier=4,
+    ),
 }
 
 CONTAINER_EVAL_RESULTS_PATH = "/aplp/evaluation_results.json"
+CONTAINER_EVAL_SCORE_KEY = "eval_loss"
 LORA_ADAPTER_CONFIG_FILE = "adapter_config.json"
 
 CONFIG_DIR = "core/config/"

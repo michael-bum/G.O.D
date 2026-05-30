@@ -4,7 +4,10 @@ from datetime import timedelta
 from datetime import timezone
 
 import validator.db.constants as cst
-from core.models.pvp_models import PvPEnvironmentResult, PvPPairDbRow, PvPPairResult
+from core.models.pvp_models import PvPEnvironmentResult
+from core.models.pvp_models import PvPIndividualScoreDbRow
+from core.models.pvp_models import PvPPairDbRow
+from core.models.pvp_models import PvPPairResult
 from core.models.tournament_models import GroupRound
 from core.models.tournament_models import HotkeyTaskParticipation
 from core.models.tournament_models import TaskTrainingAssignment
@@ -19,8 +22,8 @@ from core.models.tournament_models import TournamentStatus
 from core.models.tournament_models import TournamentTask
 from core.models.tournament_models import TournamentTaskScore
 from core.models.tournament_models import TournamentTaskTraining
-from core.models.tournament_models import TrainingRepoInfo
 from core.models.tournament_models import TournamentType
+from core.models.tournament_models import TrainingRepoInfo
 from core.models.utility_models import GPUInfo
 from core.models.utility_models import TaskType
 from core.models.utility_models import TrainerInfo
@@ -574,7 +577,15 @@ async def update_tournament_participant_training_repo(
                 {cst.GITHUB_TOKEN} = $3, {cst.REQUESTED_DATASETS} = $4
             WHERE {cst.TOURNAMENT_ID} = $5 AND {cst.HOTKEY} = $6
         """
-        await connection.execute(query, training_repo, training_commit_hash, github_token, json.dumps(requested_datasets) if requested_datasets else None, tournament_id, hotkey)
+        await connection.execute(
+            query,
+            training_repo,
+            training_commit_hash,
+            github_token,
+            json.dumps(requested_datasets) if requested_datasets else None,
+            tournament_id,
+            hotkey,
+        )
         logger.info(f"Updated training repo for participant {hotkey} in tournament {tournament_id}")
 
 
@@ -737,7 +748,10 @@ async def add_tournament_task_hotkey_pairs_for_training(assignments: list[TaskTr
                 ({cst.TASK_ID}, {cst.HOTKEY}, {cst.CREATED_AT}, {cst.PRIORITY},
                  {cst.TRAINING_REPO}, {cst.TRAINING_COMMIT_HASH}, {cst.GITHUB_TOKEN},
                  {cst.REQUESTED_DATASETS})
-                SELECT * FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::integer[], $5::text[], $6::text[], $7::text[], $8::jsonb[])
+                SELECT * FROM unnest(
+                    $1::uuid[], $2::text[], $3::timestamptz[], $4::integer[],
+                    $5::text[], $6::text[], $7::text[], $8::jsonb[]
+                )
                 ON CONFLICT ({cst.TASK_ID}, {cst.HOTKEY}) DO NOTHING
             """
 
@@ -1522,6 +1536,75 @@ async def delete_pvp_pair_results(task_id: str, psql_db: PSQLDB) -> None:
         await connection.execute(
             f"DELETE FROM {cst.PVP_PAIR_RESULTS_TABLE} WHERE {cst.TASK_ID} = $1", task_id
         )
+
+
+# --- PvP Individual Scores ---
+
+
+async def ensure_individual_scores_exist(
+    task_id: str,
+    hotkeys: list[str],
+    environment_names: list[str],
+    psql_db: PSQLDB,
+) -> None:
+    """Create pending rows for all required hotkey+env combos if they don't exist."""
+    if not hotkeys or not environment_names:
+        return
+    rows = [(task_id, hk, env, cst.PVP_STATUS_PENDING) for hk in hotkeys for env in environment_names]
+    async with await psql_db.connection() as connection:
+        await connection.executemany(f"""
+            INSERT INTO {cst.PVP_INDIVIDUAL_SCORES_TABLE}
+                ({cst.TASK_ID}, {cst.HOTKEY}, {cst.PVP_ENVIRONMENT_NAME}, {cst.STATUS})
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT ({cst.TASK_ID}, {cst.HOTKEY}, {cst.PVP_ENVIRONMENT_NAME}) DO NOTHING
+        """, rows)
+
+
+async def save_individual_score(
+    task_id: str,
+    hotkey: str,
+    environment_name: str,
+    score: float,
+    psql_db: PSQLDB,
+) -> None:
+    """Mark a hotkey+env individual score as complete."""
+    async with await psql_db.connection() as connection:
+        await connection.execute(f"""
+            UPDATE {cst.PVP_INDIVIDUAL_SCORES_TABLE}
+            SET {cst.PVP_INDIVIDUAL_SCORE} = $4, {cst.STATUS} = $5,
+                {cst.UPDATED_AT} = CURRENT_TIMESTAMP
+            WHERE {cst.TASK_ID} = $1 AND {cst.HOTKEY} = $2
+                AND {cst.PVP_ENVIRONMENT_NAME} = $3
+        """, task_id, hotkey, environment_name, score, cst.PVP_STATUS_COMPLETE)
+
+
+async def increment_individual_score_attempts(
+    task_id: str,
+    hotkey: str,
+    environment_name: str,
+    psql_db: PSQLDB,
+) -> None:
+    """Increment attempt count for a hotkey+env that isn't complete."""
+    async with await psql_db.connection() as connection:
+        await connection.execute(f"""
+            UPDATE {cst.PVP_INDIVIDUAL_SCORES_TABLE}
+            SET {cst.PVP_N_ATTEMPTS} = {cst.PVP_N_ATTEMPTS} + 1,
+                {cst.UPDATED_AT} = CURRENT_TIMESTAMP
+            WHERE {cst.TASK_ID} = $1 AND {cst.HOTKEY} = $2
+                AND {cst.PVP_ENVIRONMENT_NAME} = $3 AND {cst.STATUS} != $4
+        """, task_id, hotkey, environment_name, cst.PVP_STATUS_COMPLETE)
+
+
+async def get_individual_scores(task_id: str, psql_db: PSQLDB) -> list[PvPIndividualScoreDbRow]:
+    """Get all individual score rows for a task."""
+    async with await psql_db.connection() as connection:
+        rows = await connection.fetch(f"""
+            SELECT {cst.HOTKEY}, {cst.PVP_ENVIRONMENT_NAME},
+                   {cst.PVP_INDIVIDUAL_SCORE}, {cst.STATUS}, {cst.PVP_N_ATTEMPTS}
+            FROM {cst.PVP_INDIVIDUAL_SCORES_TABLE}
+            WHERE {cst.TASK_ID} = $1
+        """, task_id)
+        return [PvPIndividualScoreDbRow(task_id=task_id, **dict(r)) for r in rows]
 
 
 async def get_sibling_env_baseline_stats(

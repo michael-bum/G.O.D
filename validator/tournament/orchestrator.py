@@ -40,8 +40,8 @@ from validator.db.sql import tournaments as tournament_sql
 from validator.tasks.synthetic_scheduler import apply_baseline_ctx_scale
 from validator.db.sql.tournaments import get_tournament_id_by_task_id
 from validator.evaluation.scoring import _get_dataset_type
-from validator.evaluation.scoring import should_use_pvp
-from validator.tournament.utils import get_tournament_gpu_requirement
+from validator.evaluation.scoring import should_use_tournament_eval
+from validator.tournament.gpu import get_tournament_gpu_requirement
 from validator.utils.logging import LogContext
 from validator.utils.logging import get_logger
 from validator.utils.util import try_db_connections
@@ -540,7 +540,7 @@ async def _check_suitable_gpus(config: Config, required_gpus: GpuRequirement) ->
     """
     try:
         trainers = await tournament_sql.get_trainers(config.psql_db)
-        required_gpu_count = _get_gpu_count_from_requirement(required_gpus)
+        required_gpu_count = required_gpus.gpu_count
 
         best_trainer = None
         best_gpu_ids = None
@@ -574,24 +574,6 @@ async def _check_suitable_gpus(config: Config, required_gpus: GpuRequirement) ->
         logger.error(f"Error checking suitable GPUs: {str(e)}")
         return None
 
-
-def _get_gpu_count_from_requirement(requirement: GpuRequirement) -> int:
-    """
-    Get the number of GPUs required for a given GPU requirement.
-    """
-    if requirement == GpuRequirement.A100:
-        return 1
-    elif requirement == GpuRequirement.H100_1X:
-        return 1
-    elif requirement == GpuRequirement.H100_2X:
-        return 2
-    elif requirement == GpuRequirement.H100_4X:
-        return 4
-    elif requirement == GpuRequirement.H100_8X:
-        return 8
-
-    # Default to 1 if unknown
-    return 1
 
 
 async def _create_training_request(
@@ -944,7 +926,7 @@ async def seed_tournament_evaluations_from_training(config: Config):
                 try:
                     # For PvP tasks, only seed eval rows once ALL miners have terminal training.
                     # Otherwise miners get evaluated individually as they finish, producing 0 PvP pairs.
-                    if should_use_pvp(task):
+                    if should_use_tournament_eval(task):
                         statuses = await tournament_sql.get_training_status_for_task(str(task.task_id), config.psql_db)
                         if statuses and any(s not in ("success", "failure") for s in statuses.values()):
                             continue
@@ -1161,7 +1143,7 @@ async def process_awaiting_model_prep_tasks(config: Config):
     # Deferred imports to avoid circular dependency
     # (model_prep imports _check_suitable_gpus from this module)
     from validator.utils.model_prep import dispatch_augmentation_and_stats
-    from validator.tournament.utils import get_tournament_gpu_requirement
+    from validator.tournament.gpu import get_tournament_gpu_requirement
 
     # Track per-miner preps independently: "task_id:hotkey"
     _miner_prep_in_progress: set[str] = set()

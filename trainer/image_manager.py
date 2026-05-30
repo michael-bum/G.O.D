@@ -20,21 +20,21 @@ from core.models.payload_models import TrainRequestImage
 from core.models.payload_models import TrainRequestText
 from core.models.utility_models import ChatTemplateDatasetType
 from core.models.utility_models import DpoDatasetType
+from core.models.utility_models import EnvironmentDatasetType
 from core.models.utility_models import FileFormat
 from core.models.utility_models import GrpoDatasetType
 from core.models.utility_models import ImageModelType
 from core.models.utility_models import InstructTextDatasetType
-from core.models.utility_models import EnvironmentDatasetType
 from core.models.utility_models import TaskType
 from trainer import constants as cst
 from trainer.tasks import complete_task
 from trainer.tasks import log_task
 from trainer.tasks import update_container_name
 from trainer.tasks import update_wandb_url
-from trainer.utils.trainer_logging import logger
 from trainer.utils.misc import build_wandb_env
 from trainer.utils.misc import extract_container_error
 from trainer.utils.model_anonymizer import get_anonymous_model_dir
+from trainer.utils.trainer_logging import logger
 from validator.utils.logging import get_all_context_tags
 from validator.utils.logging import stream_container_logs
 from validator.utils.logging import stream_image_build_logs
@@ -226,7 +226,9 @@ async def run_trainer_container_image(
                 detach=True,
             )
 
-            log_streaming_task = asyncio.create_task(asyncio.to_thread(stream_container_logs, container, get_all_context_tags()))
+            _log_streaming_task = asyncio.create_task(
+                asyncio.to_thread(stream_container_logs, container, get_all_context_tags())
+            )
             return container
 
         except Exception as e:
@@ -329,7 +331,9 @@ async def run_trainer_container_text(
                 environment=environment,
             )
 
-            log_streaming_task = asyncio.create_task(asyncio.to_thread(stream_container_logs, container, get_all_context_tags()))
+            _log_streaming_task = asyncio.create_task(
+                asyncio.to_thread(stream_container_logs, container, get_all_context_tags())
+            )
             return container
 
         except Exception as e:
@@ -457,16 +461,22 @@ def _start_env_sidecars(
     ensure_internal_network()
     loop = asyncio.new_event_loop()
 
-    image_to_url: dict[str, str] = {}
+    image_to_url: dict[tuple[str, tuple[str, ...]], str] = {}
     containers: list[Container] = []
 
     try:
         for env_name, cfg in env_configs.items():
-            if cfg.env_image in image_to_url:
+            image_key = (cfg.env_image, tuple(cfg.env_server_command or []))
+            if image_key in image_to_url:
                 continue
 
             container = loop.run_until_complete(
-                run_environment_server_container(env_name, log_labels or {}, image=cfg.env_image)
+                run_environment_server_container(
+                    env_name,
+                    log_labels or {},
+                    image=cfg.env_image,
+                    command=cfg.env_server_command,
+                )
             )
             if container is None:
                 continue
@@ -474,15 +484,16 @@ def _start_env_sidecars(
             containers.append(container)
             ip = loop.run_until_complete(_resolve_container_ip(container))
             url = f"http://{ip}:8000"
-            image_to_url[cfg.env_image] = url
+            image_to_url[image_key] = url
             logger.info(f"Env sidecar for {cfg.env_image}: {url}", extra=log_labels)
     finally:
         loop.close()
 
     env_url_map: dict[EnvironmentName, str] = {}
     for env_name, cfg in env_configs.items():
-        if cfg.env_image in image_to_url:
-            env_url_map[env_name] = image_to_url[cfg.env_image]
+        image_key = (cfg.env_image, tuple(cfg.env_server_command or []))
+        if image_key in image_to_url:
+            env_url_map[env_name] = image_to_url[image_key]
 
     return env_url_map, containers
 
@@ -564,7 +575,11 @@ def run_model_prep_container(
         ]
 
     if reward_functions:
-        command += ["--reward-functions", json.dumps([rf.model_dump() if hasattr(rf, "model_dump") else rf for rf in reward_functions])]
+        reward_functions_payload = [
+            rf.model_dump() if hasattr(rf, "model_dump") else rf
+            for rf in reward_functions
+        ]
+        command += ["--reward-functions", json.dumps(reward_functions_payload)]
 
     if env_configs_with_urls:
         command += ["--env-configs", json.dumps(env_configs_with_urls)]
@@ -636,16 +651,29 @@ FALLBACK_ENV_IMAGES: dict[core_cst.EnvironmentName, str] = {
 }
 
 
+def _select_training_env_server_name(
+    environment_names: list[core_cst.EnvironmentName] | None,
+) -> core_cst.EnvironmentName | None:
+    for env_name in environment_names or []:
+        resolved = core_cst.EnvironmentName(env_name)
+        if resolved != core_cst.EnvironmentName.INTERCODE:
+            return resolved
+    return None
+
+
 async def run_environment_server_container(
-    environment_name: core_cst.EnvironmentName,
+    environment_name: core_cst.EnvironmentName | None,
     log_labels: dict,
     image: str | None = None,
+    command: list[str] | None = None,
 ) -> Container | None:
     client = docker.from_env()
 
     ensure_internal_network()
 
-    resolved_image = image or FALLBACK_ENV_IMAGES.get(environment_name)
+    env_config = core_cst.ENVIRONMENT_CONFIGS.get(environment_name) if environment_name else None
+    resolved_image = image or (env_config.env_image if env_config else None) or FALLBACK_ENV_IMAGES.get(environment_name)
+    resolved_command = command if command is not None else (env_config.env_server_command if env_config else None)
     if resolved_image is None:
         logger.warning(f"No image for environment '{environment_name}', cannot start sidecar")
         return None
@@ -656,6 +684,7 @@ async def run_environment_server_container(
         client.containers.run,
         image=resolved_image,
         name=container_name,
+        command=resolved_command,
         detach=True,
         labels=log_labels,
         network=cst.INTERNAL_BRIDGE_NAME,
@@ -711,7 +740,9 @@ async def upload_repo_to_hf(
             name=container_name,
         )
 
-        log_streaming_task = asyncio.create_task(asyncio.to_thread(stream_container_logs, container, get_all_context_tags()))
+        _log_streaming_task = asyncio.create_task(
+            asyncio.to_thread(stream_container_logs, container, get_all_context_tags())
+        )
 
         result = await asyncio.to_thread(container.wait)
         logs = (await asyncio.to_thread(container.logs)).decode("utf-8", errors="ignore")
@@ -856,18 +887,24 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
         env_urls = []
         env_server_url_str = None
         if task_type == TaskType.ENVIRONMENTTASK:
-            logger.info("Running Environment Server Containers", extra=log_labels)
-            await log_task(training_data.task_id, task.hotkey, "Starting Environment Servers...")
-            env_name = (task.training_data.dataset_type.environment_names or [None])[0]
-            for gpu in task.gpu_ids:
-                environment_server_container = await run_environment_server_container(
-                    env_name, log_labels
-                )
-                env_server_containers.append(environment_server_container)
-                ip_address = await wait_for_env_container_ip(environment_server_container)
-                env_urls.append(f"http://{ip_address}:8000")
-            env_server_url_str = ",".join(env_urls)
-            await log_task(training_data.task_id, task.hotkey, f"Environment servers ready.")
+            env_name = _select_training_env_server_name(task.training_data.dataset_type.environment_names)
+            if env_name is None:
+                logger.info("Skipping env server containers; only InterCode environments configured", extra=log_labels)
+                await log_task(training_data.task_id, task.hotkey, "Skipping Environment Servers.")
+            else:
+                logger.info("Running Environment Server Containers", extra=log_labels)
+                await log_task(training_data.task_id, task.hotkey, "Starting Environment Servers...")
+                for gpu in task.gpu_ids:
+                    environment_server_container = await run_environment_server_container(
+                        env_name, log_labels
+                    )
+                    if environment_server_container is None:
+                        raise RuntimeError(f"Unable to start environment server for {env_name}")
+                    env_server_containers.append(environment_server_container)
+                    ip_address = await wait_for_env_container_ip(environment_server_container)
+                    env_urls.append(f"http://{ip_address}:8000")
+                env_server_url_str = ",".join(env_urls)
+                await log_task(training_data.task_id, task.hotkey, "Environment servers ready.")
 
         if model_prep_ran:
             model_for_container = get_anonymous_model_dir(training_data.model)
