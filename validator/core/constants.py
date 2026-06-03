@@ -171,14 +171,14 @@ MAX_CONCURRENT_MINER_ASSIGNMENTS = 5
 MAX_CONCURRENT_TASK_PREPS = 3
 EVAL_MAX_GPUS = 10
 
-PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_INSTRUCT_TEXT = 0.7
+PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_INSTRUCT_TEXT = 0.75
 PERCENTAGE_OF_INSTRUCT_TASKS_THAT_SHOULD_BE_CHAT = 0.5
 PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_IMAGE = 0.15
-PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_DPO = 0.1
+PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_DPO = 0.20
+# GRPO is the remainder of the text split (image is selected independently)
 PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_GRPO = (
     1
     - PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_INSTRUCT_TEXT
-    - PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_IMAGE
     - PERCENTAGE_OF_TASKS_THAT_SHOULD_BE_DPO
 )
 PERCENTAGE_OF_IMAGE_SYNTHS_SHOULD_BE_STYLE = (
@@ -241,10 +241,10 @@ IMAGE_RESOLUTION_STEP = 64  # Ensures we get resolutions divisible by 64
 # scoring stuff
 MAX_TEXT_TOURNAMENT_WEIGHT = 0.48
 MAX_IMAGE_TOURNAMENT_WEIGHT = 0.32
-MAX_ENVIRONMENT_TOURNAMENT_WEIGHT = 0.18
+MAX_ENVIRONMENT_TOURNAMENT_WEIGHT = 0.16
 TOURNAMENT_TEXT_WEIGHT = 0.15
-TOURNAMENT_IMAGE_WEIGHT = 0.10
-TOURNAMENT_ENVIRONMENT_WEIGHT = 0.17
+TOURNAMENT_IMAGE_WEIGHT = 0.125
+TOURNAMENT_ENVIRONMENT_WEIGHT = 0.15
 TOURNAMENT_INTERVAL_HOURS = 72
 
 # Tournament scheduling settings
@@ -367,7 +367,7 @@ MODEL_PREP_ENABLED_BY_TASK_TYPE: dict[TaskType, bool] = {
 AUGMENTATION_ENABLED_TEXT = True  # Enable augmentations for text tasks
 AUGMENTATION_ENABLED_IMAGE = False  # Enable augmentations for image tasks
 AUGMENTATION_ENABLED_ENV = False  # Enable augmentations for environment tasks
-AUGMENTATION_PROBABILITY = 0.75  # Probability that a task gets any augmentation at all
+AUGMENTATION_PROBABILITY = 0.9  # Probability that a task gets any augmentation at all
 
 # Weighted distribution over augmentation types (normalised at runtime)
 # When an augmentation is applied, one type is chosen according to these weights
@@ -389,10 +389,10 @@ AUGMENTATION_SCOPE_WEIGHTS: dict[AugmentationScope, float] = {
 
 # Intensity ranges per augmentation type (min, max) — sampled uniformly
 AUGMENTATION_INTENSITY_RANGES: dict[AugmentationType, tuple[float, float]] = {
-    AugmentationType.GAUSSIAN_NOISE: (0.01, 0.20),
-    AugmentationType.WEIGHT_SCALING: (0.3, 1.7),
-    AugmentationType.MAGNITUDE_PRUNING: (0.15, 0.40),
-    AugmentationType.LAYER_REINIT: (0.05, 0.15),
+    AugmentationType.GAUSSIAN_NOISE: (0.1, 0.3),
+    AugmentationType.WEIGHT_SCALING: (0.5, 2.5),
+    AugmentationType.MAGNITUDE_PRUNING: (0.25, 0.50),
+    AugmentationType.LAYER_REINIT: (0.10, 0.30),
 }
 
 # Environment evaluation constants
