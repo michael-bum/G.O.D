@@ -344,7 +344,7 @@ class TaskPerformanceDifference(BaseModel):
     task_type: str
     boss_score: float | None
     challenger_score: float | None
-    threshold_used: float  # 0.05, 0.075, or 0.10
+    threshold_used: float  # boss-round win margin (BOSS_ROUND_WIN_MARGIN)
     performance_difference: float | None  # Percentage difference (positive = challenger better)
     challenger_won: bool
 
@@ -720,3 +720,16 @@ class DedupResult(BaseModel):
     evasion_hotkeys: list[str] = []
     unclonable_hotkeys: list[str] = []
     unresolved_pairs: list[tuple[str, str]] = []
+
+
+class ContinuousSftState(BaseModel):
+    """Per-lineage state for the continuous-SFT boss task (one row per lineage slug).
+
+    train_index: monotonic cursor passed to the stateless content service (advanced by one per task).
+    last_winner_repo: previous lowest-eval-loss winner, carried forward as the next base; None first run.
+    """
+
+    lineage: str
+    train_index: int = 0
+    last_winner_repo: str | None = None
+    updated_at: datetime | None = None

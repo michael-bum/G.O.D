@@ -13,13 +13,13 @@ from validator.scoring.weights import calculate_emission_boost_from_perf
 from validator.scoring.weights import calculate_env_perf_diff_from_win_pct
 from validator.scoring.weights import calculate_hybrid_decays
 from validator.scoring.weights import calculate_tournament_weight_with_decay
+from validator.scoring.weights import emission_time_decay_fraction
 from validator.tournament.models import MinerEmissionWeight
 from validator.tournament.models import TournamentAuditData
 from validator.tournament.models import TournamentProjection
 from validator.tournament.models import TournamentType
 from validator.tournament.models import WeightProjection
 from validator.tournament.round_results import get_real_tournament_winner
-from validator.tournament.thresholds import get_progressive_threshold
 
 
 def calculate_scaled_weights(
@@ -149,7 +149,8 @@ async def calculate_tournament_projection(
         dethrones = effective_win_pct >= cts.PVP_WIN_PCT_THRESHOLD
     else:
         performance_diff = percentage_improvement / 100.0
-        dethrone_threshold = get_progressive_threshold(consecutive_wins, tournament_type)
+        # Match the boss-round crowning margin so the projection agrees with reality.
+        dethrone_threshold = t_cst.BOSS_ROUND_WIN_MARGIN
         dethrones = performance_diff > dethrone_threshold
 
     # Tournament-internal share by rank and the participation scale factor.
@@ -182,7 +183,7 @@ async def calculate_tournament_projection(
 
         projections = []
         for days in projection_days:
-            new_decay = days * cts.EMISSION_DAILY_TIME_DECAY_RATE
+            new_decay = emission_time_decay_fraction(days)
 
             raw_future_weight = calculate_tournament_weight_with_decay(
                 tournament_type=tournament_type,
